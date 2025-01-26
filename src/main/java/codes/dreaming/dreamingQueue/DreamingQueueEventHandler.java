@@ -150,6 +150,8 @@ public class DreamingQueueEventHandler {
             playerPriority = luckpermsPriority;
         }
 
+        this.logger.info(MessageFormat.format("Player({0}) in queue with priority {1}", event.getPlayer().getUsername(), playerPriority));
+
         event.setInitialServer(queueServer);
 
         QueuedPlayer queuedPlayer = new QueuedPlayer(event.getPlayer(), playerPriority);
