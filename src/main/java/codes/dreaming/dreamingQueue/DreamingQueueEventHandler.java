@@ -62,33 +62,18 @@ final class QueuedPlayer {
         return priority;
     }
 
-    public BossBar queueBar() {
-        return queueBar;
-    }
-
     @Override
     public boolean equals(Object obj) {
         if (obj == this) return true;
         if (obj == null || obj.getClass() != this.getClass()) return false;
         var that = (QueuedPlayer) obj;
-        return Objects.equals(this.player, that.player) &&
-                this.priority == that.priority &&
-                Objects.equals(this.queueBar, that.queueBar);
+        return Objects.equals(this.player, that.player);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(player, priority, queueBar);
+        return Objects.hash(player);
     }
-
-    @Override
-    public String toString() {
-        return "QueuedPlayer[" +
-                "player=" + player + ", " +
-                "priority=" + priority + ", " +
-                "queueBar=" + queueBar + ']';
-    }
-
 }
 
 public class DreamingQueueEventHandler {
