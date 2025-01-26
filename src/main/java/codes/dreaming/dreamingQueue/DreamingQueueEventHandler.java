@@ -123,7 +123,9 @@ public class DreamingQueueEventHandler {
             position++;
         }
 
-        return BossBar.bossBar(Component.text(MessageFormat.format("Sei in coda {0}/{1}", position, queuedPlayers.size() )), 1 - (float) position / queuedPlayers.size(), BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
+        float progress = 1 - ((float) position - 1) / (queuedPlayers.size() - 1);
+
+        return BossBar.bossBar(Component.text(MessageFormat.format("Sei in coda {0}/{1}", position, queuedPlayers.size() )), progress, BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
     }
 
     private void updateBossBars() {
