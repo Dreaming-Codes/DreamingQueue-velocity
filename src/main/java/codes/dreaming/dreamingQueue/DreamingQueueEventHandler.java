@@ -13,6 +13,7 @@ import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
+import net.luckperms.api.model.data.DataType;
 import net.luckperms.api.model.user.User;
 import net.luckperms.api.model.user.UserManager;
 import net.luckperms.api.node.NodeType;
@@ -85,7 +86,7 @@ public class DreamingQueueEventHandler {
 
     private final PriorityQueue<QueuedPlayer> queuedPlayers;
 
-    private final Cache<Player, Boolean> leftGracePlayers;
+    private final Cache<UUID, Player> leftGracePlayers;
 
     public static final String LuckPermsMetaPriorityKey = DreamingQueue.PLUGIN_ID + ":priority";
 
@@ -105,11 +106,11 @@ public class DreamingQueueEventHandler {
         UserManager lpUserManager = lpProvider.getUserManager();
         User lpUser = lpUserManager.getUser(uuid);
         if (lpUser != null) {
-            Optional<MetaNode> priorityNode = lpUser.getNodes(NodeType.META).stream().filter(node -> node.getMetaKey().equals(LuckPermsMetaPriorityKey)).findAny();
+            String priority = lpUser.getCachedData().getMetaData().getMetaValue(LuckPermsMetaPriorityKey);
 
-            if (priorityNode.isPresent()) {
-                return Integer.parseInt(priorityNode.get().getMetaValue());
-            }
+            if (priority == null) return null;
+
+            return Integer.parseInt(priority);
         }
         return null;
     }
@@ -140,7 +141,7 @@ public class DreamingQueueEventHandler {
 
         // Apply grace time priority
         int playerPriority = 0;
-        if (this.leftGracePlayers.getIfPresent(event.getPlayer()) != null) {
+        if (this.leftGracePlayers.getIfPresent(event.getPlayer().getUniqueId()) != null) {
             playerPriority = this.configHelper.getGracePriority();
         }
 
@@ -172,7 +173,7 @@ public class DreamingQueueEventHandler {
         }
 
         if (!disconnectedFrom.get().equals(this.queueServer)) {
-            this.leftGracePlayers.put(event.getPlayer(), true);
+            this.leftGracePlayers.put(event.getPlayer().getUniqueId(), event.getPlayer());
 
             int playerDifference = configHelper.getMaxPlayers() - this.targetServer.getPlayersConnected().size();
 
