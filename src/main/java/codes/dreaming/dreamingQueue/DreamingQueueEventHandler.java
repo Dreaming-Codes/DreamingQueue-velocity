@@ -140,6 +140,12 @@ public class DreamingQueueEventHandler {
         return BossBar.bossBar(Component.text(MessageFormat.format("Sei in coda {0}/{1}", position, queuedPlayers.size() )), (float) position / queuedPlayers.size(), BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
     }
 
+    private void updateBossBars() {
+        for (QueuedPlayer queuedPlayer : queuedPlayers) {
+            queuedPlayer.paintBossBar(this.buildBossBar(queuedPlayer.player()));
+        }
+    }
+
     @Subscribe
     public void onPlayerEnter(PlayerChooseInitialServerEvent event) throws SerializationException {
         // If server is not full
@@ -163,16 +169,14 @@ public class DreamingQueueEventHandler {
 
         QueuedPlayer queuedPlayer = new QueuedPlayer(event.getPlayer(), playerPriority);
         queuedPlayers.add(queuedPlayer);
-        queuedPlayer.paintBossBar(this.buildBossBar(event.getPlayer()));
+        this.updateBossBars();
     }
 
     @Subscribe
     public void onPlayerDisconnect(DisconnectEvent event) throws SerializationException {
         this.queuedPlayers.removeIf(p -> p.player().equals(event.getPlayer()));
 
-        for (QueuedPlayer queuedPlayer : queuedPlayers) {
-            queuedPlayer.paintBossBar(this.buildBossBar(queuedPlayer.player()));
-        }
+        this.updateBossBars();
 
         Optional<ServerConnection> disconnectedFrom = event.getPlayer().getCurrentServer();
         if (disconnectedFrom.isEmpty()) {
