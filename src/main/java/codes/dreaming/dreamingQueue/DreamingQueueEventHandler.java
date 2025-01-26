@@ -204,6 +204,7 @@ public class DreamingQueueEventHandler {
                     }
                     return null;
                 });
+                this.updateBossBars();
             }
         }
     }
