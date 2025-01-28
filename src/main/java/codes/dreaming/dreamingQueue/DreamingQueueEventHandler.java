@@ -134,36 +134,68 @@ public class DreamingQueueEventHandler {
         }
     }
 
-    @Subscribe
-    public void onPlayerEnter(PlayerChooseInitialServerEvent event) throws SerializationException {
+    /**
+     * Handles enter of a player that has been already redirected to a queue server
+     * @param player The player to manage
+     * @throws SerializationException If there's a config error
+     * @return true means the player has been added to the queue, false means it should skip it
+     */
+    private boolean handlePlayerEnter(Player player) throws SerializationException {
         // If server is not full
-        if (targetServer.getPlayersConnected().size() < configHelper.getMaxPlayers()) return;
+        if (targetServer.getPlayersConnected().size() < configHelper.getMaxPlayers()) return false;
         // If it has permission to bypass queue
-        if (event.getPlayer().hasPermission(DreamingQueue.PLUGIN_ID + ".bypass_queue")) return;
+        if (player.hasPermission(DreamingQueue.PLUGIN_ID + ".bypass_queue")) return false;
 
         // Apply grace time priority
         int playerPriority = 0;
-        if (this.leftGracePlayers.getIfPresent(event.getPlayer().getUniqueId()) != null) {
+        if (this.leftGracePlayers.getIfPresent(player.getUniqueId()) != null) {
             playerPriority = this.configHelper.getGracePriority();
         }
 
         // Apply priority from luckperms meta
-        Integer luckpermsPriority = getLuckpermsGracePriority(event.getPlayer().getUniqueId());
+        Integer luckpermsPriority = getLuckpermsGracePriority(player.getUniqueId());
         if (luckpermsPriority != null && luckpermsPriority > playerPriority) {
             playerPriority = luckpermsPriority;
         }
 
-        this.logger.info(MessageFormat.format("Player({0}) in queue with priority {1}", event.getPlayer().getUsername(), playerPriority));
+        this.logger.info(MessageFormat.format("Player({0}) in queue with priority {1}", player.getUsername(), playerPriority));
 
-        event.setInitialServer(queueServer);
-
-        QueuedPlayer queuedPlayer = new QueuedPlayer(event.getPlayer(), playerPriority);
+        QueuedPlayer queuedPlayer = new QueuedPlayer(player, playerPriority);
         queuedPlayers.add(queuedPlayer);
         this.updateBossBars();
+
+        return true;
+    }
+
+    /**
+     * Handle a player that's already in a queue server and need to be handled
+     */
+    public void handleAlreadyInPlayerRequeue(Player player) throws SerializationException {
+        if (!this.handlePlayerEnter(player)) {
+            player.createConnectionRequest(this.targetServer).connect().thenApply(result -> {
+                if (result.getStatus() != ConnectionRequestBuilder.Status.SUCCESS) {
+                    try {
+                        player.disconnect(Component.text("Unable to connect to server"));
+                    } catch (Exception e) {
+                        // Ignore disconnection error, player already disconnected
+                    }
+                }
+                return null;
+            });
+        }
     }
 
     @Subscribe
-    public void onPlayerDisconnect(DisconnectEvent event) throws SerializationException {
+    private void onPlayerEnter(PlayerChooseInitialServerEvent event) throws SerializationException {
+        if (DreamingQueue.skipPlayers.remove(event.getPlayer().getUniqueId())) return;
+
+        if (this.handlePlayerEnter(event.getPlayer())) {
+            event.setInitialServer(queueServer);
+        }
+    }
+
+    @Subscribe
+    private void onPlayerDisconnect(DisconnectEvent event) throws SerializationException {
         this.queuedPlayers.removeIf(p -> p.player().equals(event.getPlayer()));
 
         this.updateBossBars();
