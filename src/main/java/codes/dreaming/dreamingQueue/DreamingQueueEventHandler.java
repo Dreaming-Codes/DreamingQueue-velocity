@@ -305,7 +305,9 @@ public class DreamingQueueEventHandler {
   @Subscribe
   private void onPlayerKick(ServerConnectedEvent event) throws SerializationException {
     if (event.getPreviousServer().isPresent() && event.getPreviousServer().get() == this.targetServer) {
-      this.movePlayerFromQueue();
+      if (this.getMonitoredServerStatus()) {
+        this.movePlayerFromQueue();
+      }
       if (event.getServer().equals(this.queueServer)) {
         this.proxyServer.getScheduler().buildTask(this.pluginInstace, () -> {
           try {
