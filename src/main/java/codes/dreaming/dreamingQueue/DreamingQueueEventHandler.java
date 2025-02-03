@@ -4,10 +4,13 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
+import com.velocitypowered.api.event.connection.PreTransferEvent;
+import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent;
 import com.velocitypowered.api.proxy.ConnectionRequestBuilder;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ServerConnection;
+import com.velocitypowered.api.proxy.server.PingOptions;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
@@ -15,11 +18,17 @@ import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.model.user.User;
 import net.luckperms.api.model.user.UserManager;
+
 import org.spongepowered.configurate.serialize.SerializationException;
 
 import javax.annotation.Nullable;
+
+import java.awt.TextComponent;
 import java.text.MessageFormat;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
@@ -96,6 +105,45 @@ public class DreamingQueueEventHandler {
 
   public static final String LuckPermsMetaPriorityKey = DreamingQueue.PLUGIN_ID + ":priority";
 
+  static Boolean targetOn = false;
+  private ScheduledExecutorService targetServerMonitor = null;
+
+  private Boolean getTargetServerStatus() {
+    boolean serverStatus = false;
+    try {
+      var pingResult = this.targetServer.ping().join().getDescriptionComponent();
+      serverStatus = pingResult.equals(Component.text("true"));
+    } catch (Exception e) {
+      // Ignore exception
+    }
+
+    return serverStatus;
+  }
+
+  private Boolean getMonitoredServerStatus() {
+    DreamingQueueEventHandler.targetOn = this.getTargetServerStatus();
+    if (!DreamingQueueEventHandler.targetOn) {
+      if (targetServerMonitor == null) {
+        targetServerMonitor = Executors.newSingleThreadScheduledExecutor();
+        targetServerMonitor.scheduleWithFixedDelay(() -> {
+          DreamingQueueEventHandler.targetOn = this.getTargetServerStatus();
+          if (DreamingQueueEventHandler.targetOn) {
+            targetServerMonitor.shutdown();
+            targetServerMonitor = null;
+            try {
+              this.movePlayerFromQueue();
+            } catch (Exception e) {
+              // Ignore error
+            }
+          }
+        }, 5, 5, TimeUnit.SECONDS);
+      }
+
+    }
+
+    return DreamingQueueEventHandler.targetOn;
+  }
+
   DreamingQueueEventHandler(Logger logger, ConfigHelper configHelper, RegisteredServer targetServer,
       RegisteredServer queueServer) throws SerializationException {
     this.logger = logger;
@@ -159,7 +207,7 @@ public class DreamingQueueEventHandler {
    */
   private boolean handlePlayerEnter(Player player) throws SerializationException {
     // If server is not full
-    if (targetServer.getPlayersConnected().size() < configHelper.getMaxPlayers())
+    if (targetServer.getPlayersConnected().size() < configHelper.getMaxPlayers() && this.getMonitoredServerStatus())
       return false;
     // If it has permission to bypass queue
     if (player.hasPermission(DreamingQueue.PLUGIN_ID + ".bypass_queue"))
@@ -215,6 +263,36 @@ public class DreamingQueueEventHandler {
     }
   }
 
+  private void movePlayerFromQueue() throws SerializationException {
+    int playerDifference = configHelper.getMaxPlayers() - this.targetServer.getPlayersConnected().size();
+
+    for (int difference = playerDifference; difference > 0; difference--) {
+      if (queuedPlayers.isEmpty())
+        return;
+      QueuedPlayer queuedPlayer = this.queuedPlayers.remove(0);
+
+      queuedPlayer.hideBar();
+      queuedPlayer.player().createConnectionRequest(this.targetServer).connect().thenApply(result -> {
+        if (result.getStatus() != ConnectionRequestBuilder.Status.SUCCESS) {
+          try {
+            queuedPlayer.player().disconnect(Component.text("Unable to connect to server"));
+          } catch (Exception e) {
+            // Ignore disconnection error, player already disconnected
+          }
+        }
+        return null;
+      });
+      this.updateBossBars();
+    }
+  }
+
+  @Subscribe
+  private void onPlayerKick(KickedFromServerEvent event) throws SerializationException {
+    if (event.getResult() instanceof KickedFromServerEvent.RedirectPlayer) {
+      this.handleAlreadyInPlayerRequeue(event.getPlayer());
+    }
+  }
+
   @Subscribe
   private void onPlayerDisconnect(DisconnectEvent event) throws SerializationException {
     this.queuedPlayers.removeIf(p -> p.player().equals(event.getPlayer()));
@@ -230,25 +308,8 @@ public class DreamingQueueEventHandler {
     if (!disconnectedFrom.get().getServer().equals(this.queueServer)) {
       this.leftGracePlayers.put(event.getPlayer().getUniqueId(), event.getPlayer());
 
-      int playerDifference = configHelper.getMaxPlayers() - this.targetServer.getPlayersConnected().size();
-
-      for (int difference = playerDifference; difference > 0; difference--) {
-        if (queuedPlayers.isEmpty())
-          return;
-        QueuedPlayer queuedPlayer = this.queuedPlayers.remove(0);
-
-        queuedPlayer.hideBar();
-        queuedPlayer.player().createConnectionRequest(this.targetServer).connect().thenApply(result -> {
-          if (result.getStatus() != ConnectionRequestBuilder.Status.SUCCESS) {
-            try {
-              queuedPlayer.player().disconnect(Component.text("Unable to connect to server"));
-            } catch (Exception e) {
-              // Ignore disconnection error, player already disconnected
-            }
-          }
-          return null;
-        });
-        this.updateBossBars();
+      if (this.getMonitoredServerStatus()) {
+        movePlayerFromQueue();
       }
     }
   }
