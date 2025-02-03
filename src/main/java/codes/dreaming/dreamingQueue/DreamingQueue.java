@@ -54,7 +54,7 @@ public class DreamingQueue {
         RegisteredServer targetServer = proxyServer.getServer(configHelper.getTargetServer()).orElseThrow();
         RegisteredServer queueServer = proxyServer.getServer(configHelper.getQueueServer()).orElseThrow();
 
-        DreamingQueue.INSTANCE = new DreamingQueueEventHandler(logger, configHelper, targetServer, queueServer);
+        DreamingQueue.INSTANCE = new DreamingQueueEventHandler(logger, configHelper, proxyServer, this, targetServer, queueServer);
 
         proxyServer.getEventManager().register(this, DreamingQueue.INSTANCE);
     }

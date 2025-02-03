@@ -7,11 +7,14 @@ import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.PreTransferEvent;
 import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent;
+import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.proxy.ConnectionRequestBuilder;
 import com.velocitypowered.api.proxy.Player;
+import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.ServerConnection;
-import com.velocitypowered.api.proxy.server.PingOptions;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
+import com.velocitypowered.api.scheduler.ScheduledTask;
+
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.luckperms.api.LuckPerms;
@@ -23,12 +26,8 @@ import org.spongepowered.configurate.serialize.SerializationException;
 
 import javax.annotation.Nullable;
 
-import java.awt.TextComponent;
 import java.text.MessageFormat;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
@@ -96,6 +95,8 @@ public class DreamingQueueEventHandler {
   private final Logger logger;
   private final ConfigHelper configHelper;
 
+  private final DreamingQueue pluginInstace;
+  private final ProxyServer proxyServer;
   private final RegisteredServer targetServer;
   private final RegisteredServer queueServer;
 
@@ -106,7 +107,7 @@ public class DreamingQueueEventHandler {
   public static final String LuckPermsMetaPriorityKey = DreamingQueue.PLUGIN_ID + ":priority";
 
   static Boolean targetOn = false;
-  private ScheduledExecutorService targetServerMonitor = null;
+  private ScheduledTask targetServerMonitor = null;
 
   private Boolean getTargetServerStatus() {
     boolean serverStatus = false;
@@ -117,6 +118,14 @@ public class DreamingQueueEventHandler {
       // Ignore exception
     }
 
+    if (serverStatus && !targetOn) {
+      try {
+        this.movePlayerFromQueue();
+      } catch (Exception e) {
+        // Ignore error
+      }
+    }
+
     return serverStatus;
   }
 
@@ -124,19 +133,13 @@ public class DreamingQueueEventHandler {
     DreamingQueueEventHandler.targetOn = this.getTargetServerStatus();
     if (!DreamingQueueEventHandler.targetOn) {
       if (targetServerMonitor == null) {
-        targetServerMonitor = Executors.newSingleThreadScheduledExecutor();
-        targetServerMonitor.scheduleWithFixedDelay(() -> {
+        targetServerMonitor = proxyServer.getScheduler().buildTask(this.pluginInstace, (selfTask) -> {
           DreamingQueueEventHandler.targetOn = this.getTargetServerStatus();
           if (DreamingQueueEventHandler.targetOn) {
-            targetServerMonitor.shutdown();
+            selfTask.cancel();
             targetServerMonitor = null;
-            try {
-              this.movePlayerFromQueue();
-            } catch (Exception e) {
-              // Ignore error
-            }
           }
-        }, 5, 5, TimeUnit.SECONDS);
+        }).repeat(5L, TimeUnit.SECONDS).schedule();
       }
 
     }
@@ -144,10 +147,13 @@ public class DreamingQueueEventHandler {
     return DreamingQueueEventHandler.targetOn;
   }
 
-  DreamingQueueEventHandler(Logger logger, ConfigHelper configHelper, RegisteredServer targetServer,
+  DreamingQueueEventHandler(Logger logger, ConfigHelper configHelper, ProxyServer proxyServer,
+      DreamingQueue pluginInstance, RegisteredServer targetServer,
       RegisteredServer queueServer) throws SerializationException {
     this.logger = logger;
     this.configHelper = configHelper;
+    this.proxyServer = proxyServer;
+    this.pluginInstace = pluginInstance;
     this.targetServer = targetServer;
     this.queueServer = queueServer;
 
@@ -243,6 +249,8 @@ public class DreamingQueueEventHandler {
       player.createConnectionRequest(this.targetServer).connect().thenApply(result -> {
         if (result.getStatus() != ConnectionRequestBuilder.Status.SUCCESS) {
           try {
+            this.logger.info("A player failed to connect to main server after queue asked to bypass it, playerName: "
+                + player.getUsername());
             player.disconnect(Component.text("Unable to connect to server"));
           } catch (Exception e) {
             // Ignore disconnection error, player already disconnected
@@ -263,12 +271,13 @@ public class DreamingQueueEventHandler {
     }
   }
 
-  private void movePlayerFromQueue() throws SerializationException {
+  private synchronized void movePlayerFromQueue() throws SerializationException {
     int playerDifference = configHelper.getMaxPlayers() - this.targetServer.getPlayersConnected().size();
 
     for (int difference = playerDifference; difference > 0; difference--) {
-      if (queuedPlayers.isEmpty())
+      if (queuedPlayers.isEmpty()) {
         return;
+      }
       QueuedPlayer queuedPlayer = this.queuedPlayers.remove(0);
 
       queuedPlayer.hideBar();
@@ -288,9 +297,24 @@ public class DreamingQueueEventHandler {
 
   @Subscribe
   private void onPlayerKick(KickedFromServerEvent event) throws SerializationException {
-    if (event.getResult() instanceof KickedFromServerEvent.RedirectPlayer) {
+    if (event.getServer().equals(this.targetServer)) {
       this.leftGracePlayers.put(event.getPlayer().getUniqueId(), event.getPlayer());
-      this.handleAlreadyInPlayerRequeue(event.getPlayer());
+    }
+  }
+
+  @Subscribe
+  private void onPlayerKick(ServerConnectedEvent event) throws SerializationException {
+    if (event.getPreviousServer().isPresent() && event.getPreviousServer().get() == this.targetServer) {
+      this.movePlayerFromQueue();
+      if (event.getServer().equals(this.queueServer)) {
+        this.proxyServer.getScheduler().buildTask(this.pluginInstace, () -> {
+          try {
+            this.handleAlreadyInPlayerRequeue(event.getPlayer());
+          } catch (Exception e) {
+            // Ignore exception
+          }
+        }).delay(10, TimeUnit.SECONDS).schedule();
+      }
     }
   }
 
