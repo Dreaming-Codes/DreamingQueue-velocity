@@ -289,6 +289,7 @@ public class DreamingQueueEventHandler {
   @Subscribe
   private void onPlayerKick(KickedFromServerEvent event) throws SerializationException {
     if (event.getResult() instanceof KickedFromServerEvent.RedirectPlayer) {
+      this.leftGracePlayers.put(event.getPlayer().getUniqueId(), event.getPlayer());
       this.handleAlreadyInPlayerRequeue(event.getPlayer());
     }
   }
