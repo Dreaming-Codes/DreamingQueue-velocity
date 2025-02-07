@@ -8,6 +8,7 @@ import com.velocitypowered.api.event.connection.PreTransferEvent;
 import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
+import com.velocitypowered.api.event.player.ServerPreConnectEvent;
 import com.velocitypowered.api.proxy.ConnectionRequestBuilder;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -205,7 +206,7 @@ public class DreamingQueueEventHandler {
 
   /**
    * Handles enter of a player that has been already redirected to a queue server
-   * 
+   *
    * @param player The player to manage
    * @throws SerializationException If there's a config error
    * @return true means the player has been added to the queue, false means it
@@ -258,6 +259,18 @@ public class DreamingQueueEventHandler {
         }
         return null;
       });
+    }
+  }
+
+  @Subscribe(priority = Short.MIN_VALUE)
+  private void onPlayerMoveToMain(ServerPreConnectEvent event) throws SerializationException {
+    if (event.getResult().getServer().orElse(null) == this.targetServer) {
+      Optional<QueuedPlayer> optionalPlayer = this.queuedPlayers.stream().filter(p -> p.player().equals(event.getPlayer())).findAny();
+      if (optionalPlayer.isEmpty()) { return; }
+      QueuedPlayer player = optionalPlayer.get();
+
+      this.queuedPlayers.remove(player);
+      player.hideBar();
     }
   }
 
