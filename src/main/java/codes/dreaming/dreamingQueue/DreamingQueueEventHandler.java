@@ -309,13 +309,6 @@ public class DreamingQueueEventHandler {
   }
 
   @Subscribe
-  private void onPlayerKick(KickedFromServerEvent event) throws SerializationException {
-    if (event.getServer().equals(this.targetServer)) {
-      this.leftGracePlayers.put(event.getPlayer().getUniqueId(), event.getPlayer());
-    }
-  }
-
-  @Subscribe
   private void onPlayerKick(ServerConnectedEvent event) throws SerializationException {
     if (event.getPreviousServer().isPresent() && event.getPreviousServer().get() == this.targetServer) {
       if (this.getMonitoredServerStatus()) {
