@@ -13,335 +13,388 @@ import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.ServerConnection;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import com.velocitypowered.api.scheduler.ScheduledTask;
-
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.model.user.User;
 import net.luckperms.api.model.user.UserManager;
-
 import org.spongepowered.configurate.serialize.SerializationException;
 
 import javax.annotation.Nullable;
-
 import java.text.MessageFormat;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 final class QueuedPlayer implements Comparable<QueuedPlayer> {
-  private final Player player;
-  private final int priority;
-  @Nullable
-  private BossBar queueBar;
+    private final Player player;
+    private final int priority;
+    @Nullable
+    private BossBar queueBar;
 
-  QueuedPlayer(Player player, int priority) {
-    this.player = player;
-    this.priority = priority;
-  }
-
-  void paintBossBar() {
-    if (this.queueBar == null)
-      return;
-    this.player.showBossBar(queueBar);
-  }
-
-  void paintBossBar(BossBar bossBar) {
-    if (this.queueBar != null) {
-      this.player.hideBossBar(this.queueBar);
+    QueuedPlayer(Player player, int priority) {
+        this.player = player;
+        this.priority = priority;
     }
-    this.player.showBossBar(bossBar);
-    this.queueBar = bossBar;
-  }
 
-  void hideBar() {
-    if (this.queueBar == null)
-      return;
-    this.player.hideBossBar(queueBar);
-  }
+    public void paintBossBar() {
+        if (this.queueBar == null) {
+            return;
+        }
+        this.player.showBossBar(queueBar);
+    }
 
-  public Player player() {
-    return player;
-  }
+    public void paintBossBar(BossBar bossBar) {
+        if (this.queueBar != null) {
+            this.player.hideBossBar(this.queueBar);
+        }
+        this.player.showBossBar(bossBar);
+        this.queueBar = bossBar;
+    }
 
-  public int priority() {
-    return priority;
-  }
+    public void hideBar() {
+        if (this.queueBar != null) {
+            this.player.hideBossBar(this.queueBar);
+        }
+    }
 
-  @Override
-  public int compareTo(QueuedPlayer otherPlayer) {
-    return Integer.compare(this.priority(), otherPlayer.priority);
-  }
+    public Player player() {
+        return player;
+    }
 
-  @Override
-  public boolean equals(Object obj) {
-    if (obj == this)
-      return true;
-    if (obj == null || obj.getClass() != this.getClass())
-      return false;
-    var that = (QueuedPlayer) obj;
-    return Objects.equals(this.player, that.player);
-  }
+    public int priority() {
+        return priority;
+    }
 
-  @Override
-  public int hashCode() {
-    return Objects.hash(player);
-  }
+    @Override
+    public int compareTo(QueuedPlayer otherPlayer) {
+        return Integer.compare(this.priority, otherPlayer.priority);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (obj == this) return true;
+        if (obj == null || obj.getClass() != this.getClass()) return false;
+        QueuedPlayer that = (QueuedPlayer) obj;
+        return this.player.equals(that.player);
+    }
+
+    @Override
+    public int hashCode() {
+        return player.hashCode();
+    }
 }
 
 public class DreamingQueueEventHandler {
-  private final Logger logger;
-  private final ConfigHelper configHelper;
+    private final Logger logger;
+    private final ConfigHelper configHelper;
+    private final DreamingQueue pluginInstance;
+    private final ProxyServer proxyServer;
+    private final RegisteredServer targetServer;
+    private final RegisteredServer queueServer;
 
-  private final DreamingQueue pluginInstace;
-  private final ProxyServer proxyServer;
-  private final RegisteredServer targetServer;
-  private final RegisteredServer queueServer;
+    /*
+     * Use dedicated lock objects to synchronize all modifications and iterations on
+     * the queuedPlayers list as well as control the scheduling of a periodic task.
+     */
+    private final Object queueLock = new Object();
+    private final Object monitorLock = new Object();
 
-  private final List<QueuedPlayer> queuedPlayers;
+    // List of players in the queue (never exposed directly).
+    private final List<QueuedPlayer> queuedPlayers = new ArrayList<>();
 
-  private final Cache<UUID, Player> leftGracePlayers;
+    /**
+     * Cache to hold players who left during a grace
+     * period. (Guava’s Cache is thread‐safe.)
+     */
+    private final Cache<UUID, Player> leftGracePlayers;
 
-  public static final String LuckPermsMetaPriorityKey = DreamingQueue.PLUGIN_ID + ":priority";
+    public static final String LuckPermsMetaPriorityKey = DreamingQueue.PLUGIN_ID + ":priority";
 
-  static Boolean targetOn = false;
-  private ScheduledTask targetServerMonitor = null;
+    // A flag and monitor for a “target server available” check.
+    private volatile boolean targetOn = false;
+    private ScheduledTask targetServerMonitor = null;
 
-  private Boolean getTargetServerStatus() {
-    boolean serverStatus = false;
-    try {
-      var pingResult = this.targetServer.ping().join().getDescriptionComponent();
-      serverStatus = pingResult.equals(Component.text("true"));
-    } catch (Exception e) {
-      // Ignore exception
+    public DreamingQueueEventHandler(Logger logger, ConfigHelper configHelper, ProxyServer proxyServer, DreamingQueue pluginInstance, RegisteredServer targetServer, RegisteredServer queueServer) throws SerializationException {
+        this.logger = logger;
+        this.configHelper = configHelper;
+        this.proxyServer = proxyServer;
+        this.pluginInstance = pluginInstance;
+        this.targetServer = targetServer;
+        this.queueServer = queueServer;
+
+        this.leftGracePlayers = CacheBuilder.newBuilder().expireAfterWrite(configHelper.getGraceMinutes(), TimeUnit.MINUTES).build();
     }
 
-    if (serverStatus && !targetOn) {
-      try {
-        this.movePlayerFromQueue();
-      } catch (Exception e) {
-        // Ignore error
-      }
-    }
+    @Nullable
+    private Integer getLuckpermsGracePriority(UUID uuid) {
+        LuckPerms lpProvider = LuckPermsProvider.get();
+        UserManager lpUserManager = lpProvider.getUserManager();
+        User lpUser = lpUserManager.getUser(uuid);
+        if (lpUser != null) {
+            String priority = lpUser.getCachedData().getMetaData().getMetaValue(LuckPermsMetaPriorityKey);
 
-    return serverStatus;
-  }
-
-  private Boolean getMonitoredServerStatus() {
-    DreamingQueueEventHandler.targetOn = this.getTargetServerStatus();
-    if (!DreamingQueueEventHandler.targetOn) {
-      if (targetServerMonitor == null) {
-        targetServerMonitor = proxyServer.getScheduler().buildTask(this.pluginInstace, (selfTask) -> {
-          DreamingQueueEventHandler.targetOn = this.getTargetServerStatus();
-          if (DreamingQueueEventHandler.targetOn) {
-            selfTask.cancel();
-            targetServerMonitor = null;
-          }
-        }).repeat(5L, TimeUnit.SECONDS).schedule();
-      }
-
-    }
-
-    return DreamingQueueEventHandler.targetOn;
-  }
-
-  DreamingQueueEventHandler(Logger logger, ConfigHelper configHelper, ProxyServer proxyServer,
-      DreamingQueue pluginInstance, RegisteredServer targetServer,
-      RegisteredServer queueServer) throws SerializationException {
-    this.logger = logger;
-    this.configHelper = configHelper;
-    this.proxyServer = proxyServer;
-    this.pluginInstace = pluginInstance;
-    this.targetServer = targetServer;
-    this.queueServer = queueServer;
-
-    this.leftGracePlayers = CacheBuilder.newBuilder().expireAfterWrite(configHelper.getGraceMinutes(), TimeUnit.MINUTES)
-        .build();
-    this.queuedPlayers = Collections.synchronizedList(new ArrayList<>());
-  }
-
-  @Nullable
-  private Integer getLuckpermsGracePriority(UUID uuid) {
-    LuckPerms lpProvider = LuckPermsProvider.get();
-    UserManager lpUserManager = lpProvider.getUserManager();
-    User lpUser = lpUserManager.getUser(uuid);
-    if (lpUser != null) {
-      String priority = lpUser.getCachedData().getMetaData().getMetaValue(LuckPermsMetaPriorityKey);
-
-      if (priority == null)
-        return null;
-
-      return Integer.parseInt(priority);
-    }
-    return null;
-  }
-
-  private BossBar buildBossBar(QueuedPlayer player) {
-    var position = this.queuedPlayers.indexOf(player) + 1;
-
-    float progress = queuedPlayers.size() == 1 ? 1 : 1 - ((float) position - 1) / (queuedPlayers.size() - 1);
-
-    return BossBar.bossBar(Component.text(MessageFormat.format("Sei in coda {0}/{1}", position, queuedPlayers.size())),
-        progress, BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
-  }
-
-  private void updateBossBars() {
-    for (QueuedPlayer queuedPlayer : queuedPlayers) {
-      queuedPlayer.paintBossBar(this.buildBossBar(queuedPlayer));
-    }
-  }
-
-  private void addToQueue(QueuedPlayer player) {
-    for (int i = queuedPlayers.size() - 1; i >= 0; i--) {
-      if (queuedPlayers.get(i).priority() >= player.priority()) {
-        queuedPlayers.add(i + 1, player);
-        return;
-      }
-    }
-    queuedPlayers.add(0, player);
-  }
-
-  /**
-   * Handles enter of a player that has been already redirected to a queue server
-   *
-   * @param player The player to manage
-   * @throws SerializationException If there's a config error
-   * @return true means the player has been added to the queue, false means it
-   *         should skip it
-   */
-  private boolean handlePlayerEnter(Player player) throws SerializationException {
-    // If server is not full
-    if (targetServer.getPlayersConnected().size() < configHelper.getMaxPlayers() && this.getMonitoredServerStatus())
-      return false;
-    // If it has permission to bypass queue
-    if (player.hasPermission(DreamingQueue.PLUGIN_ID + ".bypass_queue"))
-      return false;
-
-    // Apply grace time priority
-    int playerPriority = 0;
-    if (this.leftGracePlayers.getIfPresent(player.getUniqueId()) != null) {
-      playerPriority = this.configHelper.getGracePriority();
-    }
-
-    // Apply priority from luckperms meta
-    Integer luckpermsPriority = getLuckpermsGracePriority(player.getUniqueId());
-    if (luckpermsPriority != null && luckpermsPriority > playerPriority) {
-      playerPriority = luckpermsPriority;
-    }
-
-    this.logger
-        .info(MessageFormat.format("Player({0}) in queue with priority {1}", player.getUsername(), playerPriority));
-
-    QueuedPlayer queuedPlayer = new QueuedPlayer(player, playerPriority);
-    addToQueue(queuedPlayer);
-    this.updateBossBars();
-
-    return true;
-  }
-
-  /**
-   * Handle a player that's already in a queue server and need to be handled
-   */
-  public void handleAlreadyInPlayerRequeue(Player player) throws SerializationException {
-    if (!this.handlePlayerEnter(player)) {
-      player.createConnectionRequest(this.targetServer).connect().thenApply(result -> {
-        if (result.getStatus() != ConnectionRequestBuilder.Status.SUCCESS) {
-          try {
-            this.logger.info("A player failed to connect to main server after queue asked to bypass it, playerName: "
-                + player.getUsername());
-            player.disconnect(Component.text("Unable to connect to server"));
-          } catch (Exception e) {
-            // Ignore disconnection error, player already disconnected
-          }
+            if (priority != null) {
+                try {
+                    return Integer.parseInt(priority);
+                } catch (NumberFormatException e) {
+                    logger.warning("Invalid LuckPerms priority for player " + uuid);
+                }
+            }
         }
         return null;
-      });
     }
-  }
 
-  @Subscribe(priority = Short.MIN_VALUE)
-  private void onPlayerMoveToMain(ServerPreConnectEvent event) throws SerializationException {
-    if (event.getResult().getServer().orElse(null) == this.targetServer) {
-      Optional<QueuedPlayer> optionalPlayer = this.queuedPlayers.stream().filter(p -> p.player().equals(event.getPlayer())).findAny();
-      if (optionalPlayer.isEmpty()) { return; }
-      QueuedPlayer player = optionalPlayer.get();
-
-      this.queuedPlayers.remove(player);
-      player.hideBar();
+    /**
+     * Build a new BossBar for a given position in queue.
+     *
+     * @param position The (1-indexed) position in queue.
+     * @param total    Total number of queued players.
+     * @return a new BossBar instance
+     */
+    private BossBar buildBossBar(int position, int total) {
+        float progress = total == 1 ? 1f : 1 - ((float) (position - 1)) / (total - 1);
+        return BossBar.bossBar(Component.text(MessageFormat.format("Sei in coda {0}/{1}", position, total)), progress, BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
     }
-  }
 
-  @Subscribe
-  private void onPlayerEnter(PlayerChooseInitialServerEvent event) throws SerializationException {
-    if (DreamingQueue.skipPlayers.remove(event.getPlayer().getUniqueId()))
-      return;
-
-    if (this.handlePlayerEnter(event.getPlayer())) {
-      event.setInitialServer(queueServer);
-    }
-  }
-
-  private synchronized void movePlayerFromQueue() throws SerializationException {
-    int playerDifference = configHelper.getMaxPlayers() - this.targetServer.getPlayersConnected().size();
-
-    for (int difference = playerDifference; difference > 0; difference--) {
-      if (queuedPlayers.isEmpty()) {
-        return;
-      }
-      QueuedPlayer queuedPlayer = this.queuedPlayers.remove(0);
-
-      queuedPlayer.hideBar();
-      queuedPlayer.player().createConnectionRequest(this.targetServer).connect().thenApply(result -> {
-        if (result.getStatus() != ConnectionRequestBuilder.Status.SUCCESS) {
-          try {
-            queuedPlayer.player().disconnect(Component.text("Unable to connect to server"));
-          } catch (Exception e) {
-            // Ignore disconnection error, player already disconnected
-          }
+    /**
+     * Update the boss bars for all queued players. This must be called while
+     * holding the queueLock.
+     */
+    private void updateBossBarsInternal() {
+        int total = queuedPlayers.size();
+        for (int i = 0; i < total; i++) {
+            QueuedPlayer qp = queuedPlayers.get(i);
+            int position = i + 1;
+            BossBar bar = buildBossBar(position, total);
+            qp.paintBossBar(bar);
         }
-        return null;
-      });
-      this.updateBossBars();
-    }
-  }
-
-  @Subscribe
-  private void onPlayerKick(ServerConnectedEvent event) throws SerializationException {
-    if (event.getPreviousServer().isPresent() && event.getPreviousServer().get() == this.targetServer) {
-      if (this.getMonitoredServerStatus()) {
-        this.movePlayerFromQueue();
-      }
-      if (event.getServer().getServerInfo().equals(this.queueServer.getServerInfo())) {
-        this.proxyServer.getScheduler().buildTask(this.pluginInstace, () -> {
-          try {
-            this.handleAlreadyInPlayerRequeue(event.getPlayer());
-          } catch (Exception e) {
-            // Ignore exception
-          }
-        }).delay(10, TimeUnit.SECONDS).schedule();
-      }
-    }
-  }
-
-  @Subscribe
-  private void onPlayerDisconnect(DisconnectEvent event) throws SerializationException {
-    this.queuedPlayers.removeIf(p -> p.player().equals(event.getPlayer()));
-
-    this.updateBossBars();
-
-    Optional<ServerConnection> disconnectedFrom = event.getPlayer().getCurrentServer();
-    if (disconnectedFrom.isEmpty()) {
-      logger.warning("Unable to get which server the player was connected to, ignoring");
-      return;
     }
 
-    if (!disconnectedFrom.get().getServerInfo().equals(this.queueServer.getServerInfo())) {
-      this.leftGracePlayers.put(event.getPlayer().getUniqueId(), event.getPlayer());
-
-      if (this.getMonitoredServerStatus()) {
-        movePlayerFromQueue();
-      }
+    /**
+     * Insert the player in order. We want to place a new player after any
+     * player with an equal OR higher priority.
+     * Must be called while holding queueLock.
+     */
+    private void addToQueueInternal(QueuedPlayer newPlayer) {
+        int index = queuedPlayers.size();
+        for (int i = queuedPlayers.size() - 1; i >= 0; i--) {
+            if (queuedPlayers.get(i).priority() >= newPlayer.priority()) {
+                index = i + 1;
+                break;
+            }
+        }
+        queuedPlayers.add(index, newPlayer);
     }
-  }
+
+    /**
+     * Check if the target server is online by pinging it.
+     *
+     * <p>If the target server comes online (targetOn becomes true), it will try to
+     * move queued players.
+     *
+     * @return true if online, false otherwise.
+     */
+    private boolean getTargetServerStatus() {
+        boolean serverStatus = false;
+        try {
+            var pingResult = targetServer.ping().join().getDescriptionComponent();
+            serverStatus = pingResult.equals(Component.text("true"));
+        } catch (Exception e) {
+            // Ignore and assume server not available.
+        }
+
+        if (serverStatus && !targetOn) {
+            try {
+                movePlayerFromQueue();
+            } catch (Exception e) {
+                // Ignore any exceptions during moving players.
+            }
+        }
+        targetOn = serverStatus;
+        return serverStatus;
+    }
+
+    /**
+     * Monitors the target server by scheduling a task that periodically pings the server.
+     *
+     * @return the current value of targetOn
+     */
+    private boolean getMonitoredServerStatus() {
+        boolean currentStatus = getTargetServerStatus();
+        synchronized (monitorLock) {
+            if (!currentStatus && targetServerMonitor == null) {
+                targetServerMonitor = proxyServer.getScheduler().buildTask(pluginInstance, task -> {
+                    if (getTargetServerStatus()) {
+                        task.cancel();
+                        synchronized (monitorLock) {
+                            targetServerMonitor = null;
+                        }
+                    }
+                }).repeat(5L, TimeUnit.SECONDS).schedule();
+            }
+        }
+        return targetOn;
+    }
+
+    /**
+     * Attempts to add a player to the queue if the target server is full.
+     *
+     * @param player the player that is connecting
+     * @return true if the player was placed in queue, false if they should
+     * bypass the queue.
+     * @throws SerializationException if a configuration error occurs.
+     */
+    private boolean handlePlayerEnter(Player player) throws SerializationException {
+        if (targetServer.getPlayersConnected().size() < configHelper.getMaxPlayers() && getMonitoredServerStatus()) {
+            return false;
+        }
+
+        if (player.hasPermission(DreamingQueue.PLUGIN_ID + ".bypass_queue")) {
+            return false;
+        }
+
+        int playerPriority = 0;
+        if (leftGracePlayers.getIfPresent(player.getUniqueId()) != null) {
+            playerPriority = configHelper.getGracePriority();
+        }
+
+        Integer lpPriority = getLuckpermsGracePriority(player.getUniqueId());
+        if (lpPriority != null && lpPriority > playerPriority) {
+            playerPriority = lpPriority;
+        }
+
+        logger.info(MessageFormat.format("Player({0}) in queue with priority {1}", player.getUsername(), playerPriority));
+
+        QueuedPlayer queuedPlayer = new QueuedPlayer(player, playerPriority);
+        synchronized (queueLock) {
+            addToQueueInternal(queuedPlayer);
+            updateBossBarsInternal();
+        }
+        return true;
+    }
+
+    /**
+     * If a player is already connected to the queue server and then “retries” to
+     * connect, handle them appropriately.
+     *
+     * @param player the player to requeue.
+     * @throws SerializationException if a configuration error occurs.
+     */
+    public void handleAlreadyInPlayerRequeue(Player player) throws SerializationException {
+        if (!handlePlayerEnter(player)) {
+            player.createConnectionRequest(targetServer).connect().thenApply(result -> {
+                if (result.getStatus() != ConnectionRequestBuilder.Status.SUCCESS) {
+                    try {
+                        logger.info("A player failed to connect to main server after queue " + "asked to bypass it, playerName: " + player.getUsername());
+                        player.disconnect(Component.text("Unable to connect to server"));
+                    } catch (Exception e) {
+                        // Ignore disconnection errors.
+                    }
+                }
+                return null;
+            });
+        }
+    }
+
+    /**
+     * Moves players from the queue to the target server. It moves up to the available
+     * number of slots (based on configuration and current connections).
+     *
+     * @throws SerializationException if a configuration error occurs.
+     */
+    private void movePlayerFromQueue() throws SerializationException {
+        // First, collect all players to be moved in a thread‐safe manner.
+        List<QueuedPlayer> toMove = new ArrayList<>();
+        synchronized (queueLock) {
+            int availableSlots = configHelper.getMaxPlayers() - targetServer.getPlayersConnected().size();
+            while (availableSlots > 0 && !queuedPlayers.isEmpty()) {
+                QueuedPlayer qp = queuedPlayers.remove(0);
+                qp.hideBar();
+                toMove.add(qp);
+                availableSlots--;
+            }
+            updateBossBarsInternal();
+        }
+        // Now connect them outside the lock.
+        for (QueuedPlayer qp : toMove) {
+            qp.player().createConnectionRequest(targetServer).connect().thenApply(result -> {
+                if (result.getStatus() != ConnectionRequestBuilder.Status.SUCCESS) {
+                    try {
+                        qp.player().disconnect(Component.text("Unable to connect to server"));
+                    } catch (Exception e) {
+                        // Ignore disconnection errors.
+                    }
+                }
+                return null;
+            });
+        }
+    }
+
+    @Subscribe
+    private void onPlayerMoveToMain(ServerPreConnectEvent event) throws SerializationException {
+        if (event.getResult().getServer().orElse(null) == targetServer) {
+            synchronized (queueLock) {
+                Iterator<QueuedPlayer> it = queuedPlayers.iterator();
+                while (it.hasNext()) {
+                    QueuedPlayer qp = it.next();
+                    if (qp.player().equals(event.getPlayer())) {
+                        it.remove();
+                        qp.hideBar();
+                        break;
+                    }
+                }
+                updateBossBarsInternal();
+            }
+        }
+    }
+
+    @Subscribe
+    private void onPlayerEnter(PlayerChooseInitialServerEvent event) throws SerializationException {
+        if (DreamingQueue.skipPlayers.remove(event.getPlayer().getUniqueId())) {
+            return;
+        }
+        if (handlePlayerEnter(event.getPlayer())) {
+            event.setInitialServer(queueServer);
+        }
+    }
+
+    @Subscribe
+    private void onPlayerKick(ServerConnectedEvent event) throws SerializationException {
+        if (event.getPreviousServer().isPresent() && event.getPreviousServer().get() == targetServer) {
+            if (getMonitoredServerStatus()) {
+                movePlayerFromQueue();
+            }
+            if (event.getServer().getServerInfo().equals(queueServer.getServerInfo())) {
+                proxyServer.getScheduler().buildTask(pluginInstance, () -> {
+                    try {
+                        handleAlreadyInPlayerRequeue(event.getPlayer());
+                    } catch (Exception e) {
+                        // Ignore exceptions.
+                    }
+                }).delay(10, TimeUnit.SECONDS).schedule();
+            }
+        }
+    }
+
+    @Subscribe
+    private void onPlayerDisconnect(DisconnectEvent event) throws SerializationException {
+        synchronized (queueLock) {
+            queuedPlayers.removeIf(qp -> qp.player().equals(event.getPlayer()));
+            updateBossBarsInternal();
+        }
+
+        Optional<ServerConnection> disconnectedFrom = event.getPlayer().getCurrentServer();
+        if (disconnectedFrom.isEmpty()) {
+            logger.warning("Unable to get which server the player was connected to, ignoring");
+            return;
+        }
+        if (!disconnectedFrom.get().getServerInfo().equals(queueServer.getServerInfo())) {
+            leftGracePlayers.put(event.getPlayer().getUniqueId(), event.getPlayer());
+            if (getMonitoredServerStatus()) {
+                movePlayerFromQueue();
+            }
+        }
+    }
 }
