@@ -4,8 +4,6 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
-import com.velocitypowered.api.event.connection.PreTransferEvent;
-import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.event.player.ServerPreConnectEvent;
@@ -314,7 +312,7 @@ public class DreamingQueueEventHandler {
       if (this.getMonitoredServerStatus()) {
         this.movePlayerFromQueue();
       }
-      if (event.getServer().equals(this.queueServer)) {
+      if (event.getServer().getServerInfo().equals(this.queueServer.getServerInfo())) {
         this.proxyServer.getScheduler().buildTask(this.pluginInstace, () -> {
           try {
             this.handleAlreadyInPlayerRequeue(event.getPlayer());
@@ -338,7 +336,7 @@ public class DreamingQueueEventHandler {
       return;
     }
 
-    if (!disconnectedFrom.get().getServer().equals(this.queueServer)) {
+    if (!disconnectedFrom.get().getServerInfo().equals(this.queueServer.getServerInfo())) {
       this.leftGracePlayers.put(event.getPlayer().getUniqueId(), event.getPlayer());
 
       if (this.getMonitoredServerStatus()) {
