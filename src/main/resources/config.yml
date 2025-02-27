@@ -2,7 +2,6 @@ queueServer: "queue"
 targetServer: "main"
 maxPlayers: 100
 graceMinutes: 5
-gracePriority: 1000
 
 # Formula to calculate player priority in the queue
 # Variables available:

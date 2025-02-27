@@ -64,10 +64,6 @@ public class ConfigHelper {
     public int getGraceMinutes() throws SerializationException {
         return configData.node("graceMinutes").getInt(5);
     }
-
-    public int getGracePriority() throws SerializationException {
-        return configData.node("gracePriority").getInt(1000);
-    }
     
     /**
      * Gets the priority formula from config or returns a default formula if not set.
