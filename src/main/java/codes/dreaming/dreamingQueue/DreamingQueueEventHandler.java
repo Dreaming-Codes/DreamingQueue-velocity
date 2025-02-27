@@ -4,6 +4,7 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
+import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.event.player.ServerPreConnectEvent;
@@ -26,6 +27,7 @@ import java.text.MessageFormat;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 final class QueuedPlayer implements Comparable<QueuedPlayer> {
     private final Player player;
@@ -110,6 +112,8 @@ public class DreamingQueueEventHandler {
      */
     private final Cache<UUID, Player> leftGracePlayers;
 
+    public final Cache<String, UUID> playerNamesCache;
+
     public static final String LuckPermsMetaPriorityKey = DreamingQueue.PLUGIN_ID + ":priority";
 
     // A flag and monitor for a “target server available” check.
@@ -125,6 +129,7 @@ public class DreamingQueueEventHandler {
         this.queueServer = queueServer;
 
         this.leftGracePlayers = CacheBuilder.newBuilder().expireAfterWrite(configHelper.getGraceMinutes(), TimeUnit.MINUTES).build();
+        this.playerNamesCache = CacheBuilder.newBuilder().build();
     }
 
     @Nullable
@@ -178,7 +183,7 @@ public class DreamingQueueEventHandler {
      * Must be called while holding queueLock.
      */
     private void addToQueueInternal(QueuedPlayer newPlayer) {
-        int index = queuedPlayers.size();
+        int index = 0;
         for (int i = queuedPlayers.size() - 1; i >= 0; i--) {
             if (queuedPlayers.get(i).priority() >= newPlayer.priority()) {
                 index = i + 1;
@@ -257,6 +262,7 @@ public class DreamingQueueEventHandler {
 
         int playerPriority = 0;
         if (leftGracePlayers.getIfPresent(player.getUniqueId()) != null) {
+            leftGracePlayers.invalidate(player.getUniqueId());
             playerPriority = configHelper.getGracePriority();
         }
 
@@ -276,9 +282,6 @@ public class DreamingQueueEventHandler {
     }
 
     /**
-     * If a player is already connected to the queue server and then “retries” to
-     * connect, handle them appropriately.
-     *
      * @param player the player to requeue.
      * @throws SerializationException if a configuration error occurs.
      */
@@ -296,6 +299,35 @@ public class DreamingQueueEventHandler {
                 return null;
             });
         }
+    }
+
+    public final Set<String> getPlayersWithGrace() {
+        return leftGracePlayers.asMap().values().stream().map(Player::getUsername).collect(Collectors.toSet());
+    }
+
+    public final void removePlayerFromGrace(UUID player) {
+        leftGracePlayers.invalidate(player);
+    }
+
+    public final void removePlayerFromGrace() {
+        leftGracePlayers.invalidateAll();
+    }
+
+    private Player removePlayerFromQueue(UUID player) {
+        synchronized (queueLock) {
+            QueuedPlayer qp = queuedPlayers.stream().filter(queuedPlayer -> queuedPlayer.player().getUniqueId().equals(player)).findAny().orElse(null);
+            if (qp == null) {
+                return null;
+            }
+            queuedPlayers.remove(qp);
+            qp.hideBar();
+            return qp.player();
+        }
+    }
+
+    public void resetPlayerQueue(UUID player) throws SerializationException {
+        Player removedPlayer = removePlayerFromQueue(player);
+        handleAlreadyInPlayerRequeue(removedPlayer);
     }
 
     /**
@@ -351,7 +383,15 @@ public class DreamingQueueEventHandler {
     }
 
     @Subscribe
+    private void onPlayerKicked(KickedFromServerEvent event) {
+        this.logger.info(event.getServerKickReason().orElse(Component.text("")).toString());
+    }
+
+    @Subscribe
     private void onPlayerEnter(PlayerChooseInitialServerEvent event) throws SerializationException {
+        // Add player name to cache
+        this.playerNamesCache.put(event.getPlayer().getUsername(), event.getPlayer().getUniqueId());
+
         if (DreamingQueue.skipPlayers.remove(event.getPlayer().getUniqueId())) {
             return;
         }
@@ -361,7 +401,7 @@ public class DreamingQueueEventHandler {
     }
 
     @Subscribe
-    private void onPlayerKick(ServerConnectedEvent event) throws SerializationException {
+    private void onPlayerMove(ServerConnectedEvent event) throws SerializationException {
         if (event.getPreviousServer().isPresent() && event.getPreviousServer().get() == targetServer) {
             if (getMonitoredServerStatus()) {
                 movePlayerFromQueue();
