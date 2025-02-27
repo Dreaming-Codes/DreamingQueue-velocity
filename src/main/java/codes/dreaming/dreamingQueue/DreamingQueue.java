@@ -16,6 +16,8 @@ import com.velocitypowered.api.proxy.server.RegisteredServer;
 import net.kyori.adventure.text.Component;
 import org.spongepowered.configurate.serialize.SerializationException;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -123,7 +125,68 @@ public class DreamingQueue {
                         )));
 
 
+        // Command to check a player's online time
+        CommandMeta onlineTimeCommandMeta = commandManager.metaBuilder("onlinetime").plugin(this).build();
+        BrigadierCommand onlineTimeCommand = new BrigadierCommand(BrigadierCommand.literalArgumentBuilder("onlinetime")
+                .requires(source -> source.hasPermission(PLUGIN_ID + ".onlinetime"))
+                .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
+                        .suggests((context, builder) -> {
+                            proxyServer.getAllPlayers().forEach(player -> builder.suggest(player.getUsername()));
+                            return builder.buildFuture();
+                        })
+                        .executes(context -> {
+                            CommandSource source = context.getSource();
+                            String argumentProvider = context.getArgument("player", String.class);
+                            
+                            // Try to get the player's UUID from the cache
+                            final UUID playerUuidFromCache = INSTANCE.playerNamesCache.getIfPresent(argumentProvider);
+                            
+                            // Use an array to hold a mutable reference that can be modified in the lambda
+                            final UUID[] playerUuidHolder = new UUID[1];
+                            playerUuidHolder[0] = playerUuidFromCache;
+                            
+                            // If UUID not in cache, try to get from online player
+                            if (playerUuidHolder[0] == null) {
+                                proxyServer.getPlayer(argumentProvider).ifPresent(player -> {
+                                    playerUuidHolder[0] = player.getUniqueId();
+                                    INSTANCE.playerNamesCache.put(argumentProvider, player.getUniqueId());
+                                });
+                            }
+                            
+                            if (playerUuidHolder[0] != null) {
+                                // Get the player's UUID from the holder
+                                final UUID playerUUID = playerUuidHolder[0];
+                                
+                                // Get the stored online time
+                                final long[] totalOnlineTime = {INSTANCE.getPlayerOnlineTime(playerUUID)};
+                                
+                                // If the player is currently online, add their current session time
+                                proxyServer.getPlayer(playerUUID).ifPresent(player -> {
+                                    Instant loginTime = INSTANCE.getCurrentSessionStart(playerUUID);
+                                    if (loginTime != null) {
+                                        long sessionSeconds = Duration.between(loginTime, Instant.now()).getSeconds();
+                                        totalOnlineTime[0] += sessionSeconds;
+                                    }
+                                });
+                                
+                                // Format the time nicely
+                                long hours = totalOnlineTime[0] / 3600;
+                                long minutes = (totalOnlineTime[0] % 3600) / 60;
+                                long seconds = totalOnlineTime[0] % 60;
+                                
+                                source.sendMessage(Component.text(String.format(
+                                        "%s has been online for %d hours, %d minutes, and %d seconds",
+                                        argumentProvider, hours, minutes, seconds)));
+                            } else {
+                                source.sendMessage(Component.text("Player not found or has no online time recorded"));
+                            }
+                            
+                            return Command.SINGLE_SUCCESS;
+                        })
+                ));
+
         commandManager.register(reloadCommandMeta, reloadCommand);
         commandManager.register(manageQueueCommandMeta, manageQueueCommand);
+        commandManager.register(onlineTimeCommandMeta, onlineTimeCommand);
     }
 }

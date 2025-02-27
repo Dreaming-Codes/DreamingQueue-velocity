@@ -3,3 +3,14 @@ targetServer: "main"
 maxPlayers: 100
 graceMinutes: 5
 gracePriority: 1000
+
+# Formula to calculate player priority in the queue
+# Variables available:
+# - %lp_priority% : Player's LuckPerms priority (from dreamingqueue:priority meta)
+# - %online_time% : Player's online time in seconds
+# 
+# Examples:
+# - Basic: "%lp_priority%" (just use LuckPerms priority)
+# - With time bonus: "%lp_priority% + (%online_time% / 360)" (add ~10 points per hour played)
+# - Advanced: "(%lp_priority% * 100) + Math.min(500, %online_time% / 72)" (LP priority is primary, capped time bonus)
+priorityFormula: "%lp_priority% + (%online_time% / 360)"

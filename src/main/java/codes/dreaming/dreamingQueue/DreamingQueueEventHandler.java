@@ -4,6 +4,7 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
+import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
@@ -20,11 +21,16 @@ import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.model.user.User;
 import net.luckperms.api.model.user.UserManager;
+import net.luckperms.api.node.NodeType;
+import net.luckperms.api.node.types.MetaNode;
 import org.spongepowered.configurate.serialize.SerializationException;
 
 import javax.annotation.Nullable;
 import java.text.MessageFormat;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -115,6 +121,13 @@ public class DreamingQueueEventHandler {
     public final Cache<String, UUID> playerNamesCache;
 
     public static final String LuckPermsMetaPriorityKey = DreamingQueue.PLUGIN_ID + ":priority";
+    public static final String LuckPermsMetaOnlineTimeKey = DreamingQueue.PLUGIN_ID + ":onlinetime";
+    
+    // Maps player UUIDs to their login time in target server
+    private final Map<UUID, Instant> targetServerLoginTimes = new ConcurrentHashMap<>();
+    
+    // Formula evaluator for priority calculations
+    private final FormulaEvaluator formulaEvaluator;
 
     // A flag and monitor for a “target server available” check.
     private volatile boolean targetOn = false;
@@ -127,13 +140,19 @@ public class DreamingQueueEventHandler {
         this.pluginInstance = pluginInstance;
         this.targetServer = targetServer;
         this.queueServer = queueServer;
+        this.formulaEvaluator = new FormulaEvaluator(logger);
 
         this.leftGracePlayers = CacheBuilder.newBuilder().expireAfterWrite(configHelper.getGraceMinutes(), TimeUnit.MINUTES).build();
         this.playerNamesCache = CacheBuilder.newBuilder().build();
     }
 
+    /**
+     * Gets the raw LuckPerms priority value for a player.
+     * @param uuid The player's UUID
+     * @return The priority value, or null if not found
+     */
     @Nullable
-    private Integer getLuckpermsGracePriority(UUID uuid) {
+    private Integer getLuckpermsRawPriority(UUID uuid) {
         LuckPerms lpProvider = LuckPermsProvider.get();
         UserManager lpUserManager = lpProvider.getUserManager();
         User lpUser = lpUserManager.getUser(uuid);
@@ -149,6 +168,78 @@ public class DreamingQueueEventHandler {
             }
         }
         return null;
+    }
+    
+    /**
+     * Calculates player priority using the configured formula.
+     * @param uuid The player's UUID
+     * @return The calculated priority value
+     * @throws SerializationException if there's an error accessing the config
+     */
+    private int calculatePlayerPriority(UUID uuid) throws SerializationException {
+        // Get the formula from config
+        String formula = configHelper.getPriorityFormula();
+        
+        // Get the LuckPerms priority (default to 0 if not set)
+        Integer lpPriority = getLuckpermsRawPriority(uuid);
+        int priorityValue = (lpPriority != null) ? lpPriority : 0;
+        
+        // Get the player's online time
+        long onlineTime = getPlayerOnlineTime(uuid);
+        
+        // Create variables map for formula evaluation
+        Map<String, Object> variables = new HashMap<>();
+        variables.put("lp_priority", priorityValue);
+        variables.put("online_time", onlineTime);
+        
+        // Special case for grace priority
+        if (leftGracePlayers.getIfPresent(uuid) != null) {
+            int gracePriority = configHelper.getGracePriority();
+            // Use the higher of calculated priority or grace priority
+            int calculatedPriority = formulaEvaluator.evaluate(formula, variables, priorityValue);
+            return Math.max(calculatedPriority, gracePriority);
+        } else {
+            // Normal calculation
+            return formulaEvaluator.evaluate(formula, variables, priorityValue);
+        }
+    }
+    
+    
+    /**
+     * Updates the player's online time in LuckPerms metadata.
+     * @param uuid The player's UUID
+     * @param onlineTimeSeconds The player's total online time in seconds
+     */
+    private void updatePlayerOnlineTime(UUID uuid, long onlineTimeSeconds) {
+        try {
+            LuckPerms lpProvider = LuckPermsProvider.get();
+            UserManager lpUserManager = lpProvider.getUserManager();
+            User lpUser = lpUserManager.getUser(uuid);
+            if (lpUser == null) {
+                lpUser = lpUserManager.loadUser(uuid).join();
+            }
+            
+            // Remove existing meta node if it exists
+            lpUser.data().clear(node -> 
+                node.getType() == NodeType.META && 
+                ((MetaNode) node).getMetaKey().equals(LuckPermsMetaOnlineTimeKey)
+            );
+            
+            // Add the new meta node
+            MetaNode metaNode = MetaNode.builder()
+                .key(LuckPermsMetaOnlineTimeKey)
+                .value(String.valueOf(onlineTimeSeconds))
+                .build();
+            
+            lpUser.data().add(metaNode);
+            
+            // Save the changes
+            lpUserManager.saveUser(lpUser);
+            
+            logger.fine("Updated online time for " + uuid + " to " + onlineTimeSeconds + " seconds");
+        } catch (Exception e) {
+            logger.warning("Failed to update online time for player " + uuid + ": " + e.getMessage());
+        }
     }
 
     /**
@@ -260,17 +351,9 @@ public class DreamingQueueEventHandler {
             return false;
         }
 
-        int playerPriority = 0;
-        if (leftGracePlayers.getIfPresent(player.getUniqueId()) != null) {
-            leftGracePlayers.invalidate(player.getUniqueId());
-            playerPriority = configHelper.getGracePriority();
-        }
-
-        Integer lpPriority = getLuckpermsGracePriority(player.getUniqueId());
-        if (lpPriority != null && lpPriority > playerPriority) {
-            playerPriority = lpPriority;
-        }
-
+        // Calculate player priority using the formula
+        int playerPriority = calculatePlayerPriority(player.getUniqueId());
+        
         logger.info(MessageFormat.format("Player({0}) in queue with priority {1}", player.getUsername(), playerPriority));
 
         QueuedPlayer queuedPlayer = new QueuedPlayer(player, playerPriority);
@@ -311,6 +394,38 @@ public class DreamingQueueEventHandler {
 
     public final void removePlayerFromGrace() {
         leftGracePlayers.invalidateAll();
+    }
+    
+    /**
+     * Gets the start time of a player's current session in the target server.
+     * @param uuid The player's UUID
+     * @return The time when the player started their current session in the target server, or null if not in the target server
+     */
+    public Instant getCurrentSessionStart(UUID uuid) {
+        return targetServerLoginTimes.get(uuid);
+    }
+    
+    /**
+     * Gets the player's online time from LuckPerms metadata.
+     * This method is made public so it can be accessed from DreamingQueue.
+     * @param uuid The player's UUID
+     * @return The player's online time in seconds, or 0 if not found
+     */
+    public long getPlayerOnlineTime(UUID uuid) {
+        LuckPerms lpProvider = LuckPermsProvider.get();
+        UserManager lpUserManager = lpProvider.getUserManager();
+        User lpUser = lpUserManager.getUser(uuid);
+        if (lpUser != null) {
+            String onlineTime = lpUser.getCachedData().getMetaData().getMetaValue(LuckPermsMetaOnlineTimeKey);
+            if (onlineTime != null) {
+                try {
+                    return Long.parseLong(onlineTime);
+                } catch (NumberFormatException e) {
+                    logger.warning("Invalid LuckPerms online time for player " + uuid);
+                }
+            }
+        }
+        return 0;
     }
 
     private Player removePlayerFromQueue(UUID player) {
@@ -391,7 +506,7 @@ public class DreamingQueueEventHandler {
     private void onPlayerEnter(PlayerChooseInitialServerEvent event) throws SerializationException {
         // Add player name to cache
         this.playerNamesCache.put(event.getPlayer().getUsername(), event.getPlayer().getUniqueId());
-
+        
         if (DreamingQueue.skipPlayers.remove(event.getPlayer().getUniqueId())) {
             return;
         }
@@ -402,7 +517,21 @@ public class DreamingQueueEventHandler {
 
     @Subscribe
     private void onPlayerMove(ServerConnectedEvent event) throws SerializationException {
+        Player player = event.getPlayer();
+        UUID playerUUID = player.getUniqueId();
+        
+        // If player connected to the target server, start tracking time
+        if (event.getServer().getServerInfo().equals(targetServer.getServerInfo())) {
+            targetServerLoginTimes.put(playerUUID, Instant.now());
+            logger.fine("Player " + player.getUsername() + " connected to target server, starting time tracking");
+        }
+        
+        // If player left the target server
         if (event.getPreviousServer().isPresent() && event.getPreviousServer().get() == targetServer) {
+            // Update online time if they were in the target server
+            updateOnlineTimeOnLeave(playerUUID);
+            
+            // Handle queue and server availability
             if (getMonitoredServerStatus()) {
                 movePlayerFromQueue();
             }
@@ -418,20 +547,55 @@ public class DreamingQueueEventHandler {
         }
     }
 
+    /**
+     * Updates a player's online time when they leave the target server
+     * @param playerUUID The UUID of the player who left
+     */
+    private void updateOnlineTimeOnLeave(UUID playerUUID) {
+        // Get the time when they joined the target server
+        Instant loginTime = targetServerLoginTimes.remove(playerUUID);
+        if (loginTime != null) {
+            // Calculate session time
+            long sessionSeconds = Duration.between(loginTime, Instant.now()).getSeconds();
+            
+            // Get previous total online time and add this session
+            long totalOnlineTime = getPlayerOnlineTime(playerUUID) + sessionSeconds;
+            
+            // Update the player's total online time in LuckPerms
+            updatePlayerOnlineTime(playerUUID, totalOnlineTime);
+            
+            Optional<String> username = proxyServer.getPlayer(playerUUID).map(Player::getUsername);
+            logger.info(MessageFormat.format("Player {0} was in target server for {1} seconds, total time: {2} seconds", 
+                    username.orElse(playerUUID.toString()), sessionSeconds, totalOnlineTime));
+        }
+    }
+
     @Subscribe
     private void onPlayerDisconnect(DisconnectEvent event) throws SerializationException {
+        Player player = event.getPlayer();
+        UUID playerUUID = player.getUniqueId();
+        
         synchronized (queueLock) {
-            queuedPlayers.removeIf(qp -> qp.player().equals(event.getPlayer()));
+            queuedPlayers.removeIf(qp -> qp.player().equals(player));
             updateBossBarsInternal();
         }
 
-        Optional<ServerConnection> disconnectedFrom = event.getPlayer().getCurrentServer();
+        // If the player was in the target server when they disconnected,
+        // update their online time
+        Optional<ServerConnection> disconnectedFrom = player.getCurrentServer();
+        if (disconnectedFrom.isPresent() && 
+            disconnectedFrom.get().getServerInfo().equals(targetServer.getServerInfo())) {
+            // Update online time on disconnect from target server
+            updateOnlineTimeOnLeave(playerUUID);
+        }
+
         if (disconnectedFrom.isEmpty()) {
             logger.warning("Unable to get which server the player was connected to, ignoring");
             return;
         }
+        
         if (!disconnectedFrom.get().getServerInfo().equals(queueServer.getServerInfo())) {
-            leftGracePlayers.put(event.getPlayer().getUniqueId(), event.getPlayer());
+            leftGracePlayers.put(playerUUID, player);
             if (getMonitoredServerStatus()) {
                 movePlayerFromQueue();
             }
