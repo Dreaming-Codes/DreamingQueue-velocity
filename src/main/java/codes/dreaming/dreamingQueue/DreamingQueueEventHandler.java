@@ -192,16 +192,12 @@ public class DreamingQueueEventHandler {
         variables.put("lp_priority", priorityValue);
         variables.put("online_time", onlineTime);
         
-        // Special case for grace priority
-        if (leftGracePlayers.getIfPresent(uuid) != null) {
-            int gracePriority = configHelper.getGracePriority();
-            // Use the higher of calculated priority or grace priority
-            int calculatedPriority = formulaEvaluator.evaluate(formula, variables, priorityValue);
-            return Math.max(calculatedPriority, gracePriority);
-        } else {
-            // Normal calculation
-            return formulaEvaluator.evaluate(formula, variables, priorityValue);
-        }
+        // Add grace_active variable (1 if in grace period, 0 otherwise)
+        int isInGrace = (leftGracePlayers.getIfPresent(uuid) != null) ? 1 : 0;
+        variables.put("grace_active", isInGrace);
+        
+        // Calculate priority using the formula
+        return formulaEvaluator.evaluate(formula, variables, priorityValue);
     }
     
     

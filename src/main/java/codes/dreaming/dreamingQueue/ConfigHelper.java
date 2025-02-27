@@ -74,11 +74,12 @@ public class ConfigHelper {
      * Formula can include variables:
      * - %lp_priority% : Player's LuckPerms priority
      * - %online_time% : Player's online time in seconds
+     * - %grace_active% : 1 if player is in grace period, 0 otherwise
      * 
      * @return The formula string
      * @throws SerializationException If there's an error accessing the config
      */
     public String getPriorityFormula() throws SerializationException {
-        return configData.node("priorityFormula").getString("%lp_priority% + (%online_time% / 360)");
+        return configData.node("priorityFormula").getString("%lp_priority% + (%online_time% / 360) + (%grace_active% * 1000)");
     }
 }
