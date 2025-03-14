@@ -429,10 +429,9 @@ public class DreamingQueueEventHandler {
     private void onPlayerDisconnect(DisconnectEvent event) throws SerializationException {
         synchronized (queueLock) {
             boolean removed = queuedPlayers.removeIf(qp -> qp.player().equals(event.getPlayer()));
-            if (!removed) {
-                return;
+            if (removed) {
+                updateBossBarsInternal();
             }
-            updateBossBarsInternal();
         }
 
         Optional<ServerConnection> disconnectedFrom = event.getPlayer().getCurrentServer();
