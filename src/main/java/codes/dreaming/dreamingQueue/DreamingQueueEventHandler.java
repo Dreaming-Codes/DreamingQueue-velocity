@@ -392,11 +392,16 @@ public class DreamingQueueEventHandler {
         // Add player name to cache
         this.playerNamesCache.put(event.getPlayer().getUsername(), event.getPlayer().getUniqueId());
 
+        if (event.getInitialServer().isEmpty() || event.getInitialServer().get() != queueServer) {
+            return;
+        }
+
         if (DreamingQueue.skipPlayers.remove(event.getPlayer().getUniqueId())) {
             return;
         }
-        if (handlePlayerEnter(event.getPlayer())) {
-            event.setInitialServer(queueServer);
+
+        if (!handlePlayerEnter(event.getPlayer())) {
+            event.setInitialServer(targetServer);
         }
     }
 
@@ -421,11 +426,15 @@ public class DreamingQueueEventHandler {
     @Subscribe
     private void onPlayerDisconnect(DisconnectEvent event) throws SerializationException {
         synchronized (queueLock) {
-            queuedPlayers.removeIf(qp -> qp.player().equals(event.getPlayer()));
+            boolean removed = queuedPlayers.removeIf(qp -> qp.player().equals(event.getPlayer()));
+            if (!removed) {
+                return;
+            }
             updateBossBarsInternal();
         }
 
         Optional<ServerConnection> disconnectedFrom = event.getPlayer().getCurrentServer();
+
         if (disconnectedFrom.isEmpty()) {
             logger.warning("Unable to get which server the player was connected to, ignoring");
             return;
