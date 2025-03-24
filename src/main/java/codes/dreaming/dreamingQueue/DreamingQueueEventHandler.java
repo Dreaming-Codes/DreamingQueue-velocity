@@ -217,18 +217,34 @@ public class DreamingQueueEventHandler {
         try {
             int activeTotal = queuedPlayers.size();
             
-            // Count ghost positions from players with saved positions
-            int ghostPositions = 0;
+            // Get ghost positions from players with saved positions
+            List<Integer> ghostPositions = new ArrayList<>();
             if (configHelper.isRetainExactPosition()) {
-                ghostPositions = (int) leftPositionPlayers.size();
+                for (DisconnectedQueuePlayer ghostPlayer : leftPositionPlayers.asMap().values()) {
+                    ghostPositions.add(ghostPlayer.getPosition());
+                }
+                // Sort the ghost positions
+                Collections.sort(ghostPositions);
             }
             
-            int totalWithGhosts = activeTotal + ghostPositions;
+            int totalWithGhosts = activeTotal + ghostPositions.size();
             
+            // Calculate actual positions accounting for ghost positions
             for (int i = 0; i < activeTotal; i++) {
                 QueuedPlayer qp = queuedPlayers.get(i);
-                int position = i + 1;
-                BossBar bar = buildBossBar(position, totalWithGhosts);
+                
+                // Count how many ghost positions are before this player
+                int ghostsBefore = 0;
+                for (Integer ghostPos : ghostPositions) {
+                    if (ghostPos <= i) {
+                        ghostsBefore++;
+                    }
+                }
+                
+                // The actual position is the index + 1 + number of ghosts before this player
+                int actualPosition = i + 1 + ghostsBefore;
+                
+                BossBar bar = buildBossBar(actualPosition, totalWithGhosts);
                 qp.paintBossBar(bar);
             }
         } catch (Exception e) {
