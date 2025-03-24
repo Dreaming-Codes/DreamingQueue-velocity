@@ -252,8 +252,10 @@ public class DreamingQueueEventHandler {
      * @throws SerializationException if a configuration error occurs.
      */
     private boolean handlePlayerEnter(Player player) throws SerializationException {
-        if (targetServer.getPlayersConnected().size() < configHelper.getMaxPlayers() && getMonitoredServerStatus()) {
-            return false;
+        synchronized (queueLock) {
+            if (targetServer.getPlayersConnected().size() < configHelper.getMaxPlayers() && queuedPlayers.isEmpty() && getMonitoredServerStatus()) {
+                return false;
+            }
         }
 
         if (player.hasPermission(DreamingQueue.PLUGIN_ID + ".bypass_queue")) {
