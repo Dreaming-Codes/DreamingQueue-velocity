@@ -44,6 +44,13 @@ public class DreamingQueue {
     public static void requeuePlayer(Player player) throws SerializationException {
         DreamingQueue.INSTANCE.handleAlreadyInPlayerRequeue(player);
     }
+    
+    /**
+     * Force a refresh of all player queue boss bars
+     */
+    public void forceRefreshBossBars() {
+        DreamingQueue.INSTANCE.forceRefreshBossBars();
+    }
 
     @Inject
     public DreamingQueue(ProxyServer server, Logger logger) {
@@ -83,6 +90,14 @@ public class DreamingQueue {
         CommandMeta manageQueueCommandMeta = commandManager.metaBuilder("manageQueue").plugin(this).build();
         BrigadierCommand manageQueueCommand = new BrigadierCommand(BrigadierCommand.literalArgumentBuilder("manageQueue")
                 .requires(source -> source.hasPermission(PLUGIN_ID + ".manageQueue"))
+                .then(BrigadierCommand.literalArgumentBuilder("refreshBossBars")
+                        .executes(context -> {
+                            CommandSource source = context.getSource();
+                            DreamingQueue.INSTANCE.forceRefreshBossBars();
+                            source.sendMessage(Component.text("Queue boss bars have been refreshed"));
+                            return Command.SINGLE_SUCCESS;
+                        })
+                )
                 .then(BrigadierCommand.literalArgumentBuilder("removeFromGrace")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
                                 .suggests((context, builder) -> {
