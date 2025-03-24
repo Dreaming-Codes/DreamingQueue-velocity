@@ -167,25 +167,16 @@ public class DreamingQueueEventHandler {
             .expireAfterWrite(configHelper.getPositionExpirationMinutes(), TimeUnit.MINUTES)
             .removalListener(notification -> {
                 try {
-                    // Schedule the bossbar update on the main server thread to ensure consistency
-                    proxyServer.getScheduler().buildTask(pluginInstance, () -> {
-                        try {
-                            DisconnectedQueuePlayer expiredPlayer = (DisconnectedQueuePlayer) notification.getValue();
-                            logger.info(MessageFormat.format(
-                                "Reserved position for player {0} expired after {1} minutes", 
-                                expiredPlayer.getPlayer().getUsername(), 
-                                configHelper.getPositionExpirationMinutes()
-                            ));
-                            
-                            synchronized (queueLock) {
-                                updateBossBarsInternal();
-                            }
-                        } catch (Exception e) {
-                            logger.warning("Error updating boss bars on expiration: " + e.getMessage());
-                        }
-                    }).schedule();
+                    DisconnectedQueuePlayer expiredPlayer = (DisconnectedQueuePlayer) notification.getValue();
+                    logger.info(MessageFormat.format(
+                        "Reserved position for player {0} expired after {1} minutes", 
+                        expiredPlayer.getPlayer().getUsername(), 
+                        configHelper.getPositionExpirationMinutes()
+                    ));
+                    
+                    forceRefreshBossBars();
                 } catch (Exception e) {
-                    // Ignore exceptions during removal
+                    logger.warning("Error updating boss bars on expiration: " + e.getMessage());
                 }
             })
             .build();
