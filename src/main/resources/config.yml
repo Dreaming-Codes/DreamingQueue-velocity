@@ -3,3 +3,5 @@ targetServer: "main"
 maxPlayers: 100
 graceMinutes: 5
 gracePriority: 1000
+retainExactPosition: true
+positionExpirationMinutes: 10

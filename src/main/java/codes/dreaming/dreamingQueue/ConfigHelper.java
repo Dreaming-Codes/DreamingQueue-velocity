@@ -68,4 +68,12 @@ public class ConfigHelper {
     public int getGracePriority() throws SerializationException {
         return configData.node("gracePriority").getInt(1000);
     }
+
+    public boolean isRetainExactPosition() throws SerializationException {
+        return configData.node("retainExactPosition").getBoolean(true);
+    }
+
+    public int getPositionExpirationMinutes() throws SerializationException {
+        return configData.node("positionExpirationMinutes").getInt(10);
+    }
 }
