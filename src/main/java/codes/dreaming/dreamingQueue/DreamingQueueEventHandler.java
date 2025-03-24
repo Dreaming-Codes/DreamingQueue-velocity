@@ -29,6 +29,30 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
+class DisconnectedQueuePlayer {
+    private final Player player;
+    private final int position;
+    private final int priority;
+
+    DisconnectedQueuePlayer(Player player, int position, int priority) {
+        this.player = player;
+        this.position = position;
+        this.priority = priority;
+    }
+
+    public Player getPlayer() {
+        return player;
+    }
+
+    public int getPosition() {
+        return position;
+    }
+
+    public int getPriority() {
+        return priority;
+    }
+}
+
 final class QueuedPlayer implements Comparable<QueuedPlayer> {
     private final Player player;
     private final int priority;
@@ -110,7 +134,13 @@ public class DreamingQueueEventHandler {
      * Cache to hold players who left during a grace
      * period. (Guava’s Cache is thread‐safe.)
      */
-    private final Cache<UUID, Player> leftGracePlayers;
+    private final Cache<UUID, DisconnectedQueuePlayer> leftGracePlayers;
+    
+    /**
+     * Cache to hold players who left with their exact position
+     * (Guava's Cache is thread‐safe.)
+     */
+    private final Cache<UUID, DisconnectedQueuePlayer> leftPositionPlayers;
 
     public final Cache<String, UUID> playerNamesCache;
 
@@ -129,6 +159,7 @@ public class DreamingQueueEventHandler {
         this.queueServer = queueServer;
 
         this.leftGracePlayers = CacheBuilder.newBuilder().expireAfterWrite(configHelper.getGraceMinutes(), TimeUnit.MINUTES).build();
+        this.leftPositionPlayers = CacheBuilder.newBuilder().expireAfterWrite(configHelper.getPositionExpirationMinutes(), TimeUnit.MINUTES).build();
         this.playerNamesCache = CacheBuilder.newBuilder().build();
     }
 
@@ -263,9 +294,39 @@ public class DreamingQueueEventHandler {
         }
 
         int playerPriority = 0;
-        if (leftGracePlayers.getIfPresent(player.getUniqueId()) != null) {
-            leftGracePlayers.invalidate(player.getUniqueId());
-            playerPriority = configHelper.getGracePriority();
+        DisconnectedQueuePlayer positionPlayer = null;
+        
+        try {
+            // First check if we should use exact position
+            if (configHelper.isRetainExactPosition()) {
+                positionPlayer = leftPositionPlayers.getIfPresent(player.getUniqueId());
+                if (positionPlayer != null) {
+                    leftPositionPlayers.invalidate(player.getUniqueId());
+                    leftGracePlayers.invalidate(player.getUniqueId()); // Also clean up grace cache
+                    
+                    logger.info(MessageFormat.format("Player({0}) rejoined with exact position {1}", 
+                        player.getUsername(), positionPlayer.getPosition()));
+                    
+                    QueuedPlayer queuedPlayer = new QueuedPlayer(player, positionPlayer.getPriority());
+                    synchronized (queueLock) {
+                        // Insert player at specific position, but capped at queuedPlayers.size()
+                        int insertPosition = Math.min(positionPlayer.getPosition(), queuedPlayers.size());
+                        queuedPlayers.add(insertPosition, queuedPlayer);
+                        updateBossBarsInternal();
+                    }
+                    return true;
+                }
+            }
+            
+            // Fall back to grace period priority if exact position not found
+            DisconnectedQueuePlayer gracePlayer = leftGracePlayers.getIfPresent(player.getUniqueId());
+            if (gracePlayer != null) {
+                leftGracePlayers.invalidate(player.getUniqueId());
+                playerPriority = configHelper.getGracePriority();
+            }
+        } catch (Exception e) {
+            // If anything fails, continue with normal queue handling
+            logger.warning("Error handling player position: " + e.getMessage());
         }
 
         Integer lpPriority = getLuckpermsGracePriority(player.getUniqueId());
@@ -304,15 +365,17 @@ public class DreamingQueueEventHandler {
     }
 
     public final Set<String> getPlayersWithGrace() {
-        return leftGracePlayers.asMap().values().stream().map(Player::getUsername).collect(Collectors.toSet());
+        return leftGracePlayers.asMap().values().stream().map(p -> p.getPlayer().getUsername()).collect(Collectors.toSet());
     }
 
     public final void removePlayerFromGrace(UUID player) {
         leftGracePlayers.invalidate(player);
+        leftPositionPlayers.invalidate(player);
     }
 
     public final void removePlayerFromGrace() {
         leftGracePlayers.invalidateAll();
+        leftPositionPlayers.invalidateAll();
     }
 
     private Player removePlayerFromQueue(UUID player) {
@@ -427,11 +490,35 @@ public class DreamingQueueEventHandler {
 
     @Subscribe
     private void onPlayerDisconnect(DisconnectEvent event) throws SerializationException {
+        int playerQueuePosition = -1;
+        int playerPriority = 0;
+        
+        // Check if player was in queue and save their position
         synchronized (queueLock) {
-            boolean removed = queuedPlayers.removeIf(qp -> qp.player().equals(event.getPlayer()));
-            if (removed) {
-                updateBossBarsInternal();
+            for (int i = 0; i < queuedPlayers.size(); i++) {
+                QueuedPlayer qp = queuedPlayers.get(i);
+                if (qp.player().equals(event.getPlayer())) {
+                    playerQueuePosition = i;
+                    playerPriority = qp.priority();
+                    qp.hideBar();
+                    queuedPlayers.remove(i);
+                    updateBossBarsInternal();
+                    break;
+                }
             }
+        }
+        
+        // If player was in queue, store their position for rejoining
+        if (playerQueuePosition >= 0 && configHelper.isRetainExactPosition()) {
+            logger.info(MessageFormat.format("Player({0}) disconnected from position {1}, saving position for {2} minutes", 
+                event.getPlayer().getUsername(), playerQueuePosition, configHelper.getPositionExpirationMinutes()));
+            
+            DisconnectedQueuePlayer positionPlayer = new DisconnectedQueuePlayer(
+                event.getPlayer(), 
+                playerQueuePosition, 
+                playerPriority
+            );
+            leftPositionPlayers.put(event.getPlayer().getUniqueId(), positionPlayer);
         }
 
         Optional<ServerConnection> disconnectedFrom = event.getPlayer().getCurrentServer();
@@ -440,8 +527,17 @@ public class DreamingQueueEventHandler {
             logger.warning("Unable to get which server the player was connected to, ignoring");
             return;
         }
+        
+        // Only handle for non-queue server disconnections
         if (!disconnectedFrom.get().getServerInfo().equals(queueServer.getServerInfo())) {
-            leftGracePlayers.put(event.getPlayer().getUniqueId(), event.getPlayer());
+            // Store in grace period cache regardless of queue position
+            DisconnectedQueuePlayer gracePlayer = new DisconnectedQueuePlayer(
+                event.getPlayer(),
+                playerQueuePosition, 
+                configHelper.getGracePriority()
+            );
+            leftGracePlayers.put(event.getPlayer().getUniqueId(), gracePlayer);
+            
             if (getMonitoredServerStatus()) {
                 movePlayerFromQueue();
             }
