@@ -158,8 +158,23 @@ public class DreamingQueueEventHandler {
         this.targetServer = targetServer;
         this.queueServer = queueServer;
 
-        this.leftGracePlayers = CacheBuilder.newBuilder().expireAfterWrite(configHelper.getGraceMinutes(), TimeUnit.MINUTES).build();
-        this.leftPositionPlayers = CacheBuilder.newBuilder().expireAfterWrite(configHelper.getPositionExpirationMinutes(), TimeUnit.MINUTES).build();
+        this.leftGracePlayers = CacheBuilder.newBuilder()
+            .expireAfterWrite(configHelper.getGraceMinutes(), TimeUnit.MINUTES)
+            .build();
+            
+        // Add a removal listener to update the boss bars when a ghost position expires
+        this.leftPositionPlayers = CacheBuilder.newBuilder()
+            .expireAfterWrite(configHelper.getPositionExpirationMinutes(), TimeUnit.MINUTES)
+            .removalListener(notification -> {
+                try {
+                    synchronized (queueLock) {
+                        updateBossBarsInternal();
+                    }
+                } catch (Exception e) {
+                    // Ignore exceptions during removal
+                }
+            })
+            .build();
         this.playerNamesCache = CacheBuilder.newBuilder().build();
     }
 
@@ -199,12 +214,25 @@ public class DreamingQueueEventHandler {
      * holding the queueLock.
      */
     private void updateBossBarsInternal() {
-        int total = queuedPlayers.size();
-        for (int i = 0; i < total; i++) {
-            QueuedPlayer qp = queuedPlayers.get(i);
-            int position = i + 1;
-            BossBar bar = buildBossBar(position, total);
-            qp.paintBossBar(bar);
+        try {
+            int activeTotal = queuedPlayers.size();
+            
+            // Count ghost positions from players with saved positions
+            int ghostPositions = 0;
+            if (configHelper.isRetainExactPosition()) {
+                ghostPositions = (int) leftPositionPlayers.size();
+            }
+            
+            int totalWithGhosts = activeTotal + ghostPositions;
+            
+            for (int i = 0; i < activeTotal; i++) {
+                QueuedPlayer qp = queuedPlayers.get(i);
+                int position = i + 1;
+                BossBar bar = buildBossBar(position, totalWithGhosts);
+                qp.paintBossBar(bar);
+            }
+        } catch (Exception e) {
+            logger.warning("Error updating boss bars: " + e.getMessage());
         }
     }
 
@@ -303,6 +331,8 @@ public class DreamingQueueEventHandler {
                 if (positionPlayer != null) {
                     leftPositionPlayers.invalidate(player.getUniqueId());
                     leftGracePlayers.invalidate(player.getUniqueId()); // Also clean up grace cache
+                    
+                    // Since a ghost position is now filled by a real player, update all boss bars
                     
                     logger.info(MessageFormat.format("Player({0}) rejoined with exact position {1}", 
                         player.getUsername(), positionPlayer.getPosition()));
@@ -519,6 +549,11 @@ public class DreamingQueueEventHandler {
                 playerPriority
             );
             leftPositionPlayers.put(event.getPlayer().getUniqueId(), positionPlayer);
+            
+            // Update boss bars to show the ghost position
+            synchronized (queueLock) {
+                updateBossBarsInternal();
+            }
         }
 
         Optional<ServerConnection> disconnectedFrom = event.getPlayer().getCurrentServer();
