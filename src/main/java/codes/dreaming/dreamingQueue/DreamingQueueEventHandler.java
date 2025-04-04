@@ -126,9 +126,13 @@ public class DreamingQueueEventHandler {
      */
     private final Object queueLock = new Object();
     private final Object monitorLock = new Object();
+    private final Object kickedPlayersLock = new Object();
 
     // List of players in the queue (never exposed directly).
     private final List<QueuedPlayer> queuedPlayers = new ArrayList<>();
+    
+    // Set to track players who were kicked (thread-safe with explicit lock)
+    private final Set<UUID> kickedPlayers = new HashSet<>();
 
     /**
      * Cache to hold players who left during a grace
@@ -510,6 +514,12 @@ public class DreamingQueueEventHandler {
     @Subscribe
     private void onPlayerKicked(KickedFromServerEvent event) {
         this.logger.info(event.getServerKickReason().orElse(Component.text("")).toString());
+        
+        // Add kicked player to the tracking set with thread safety
+        synchronized (kickedPlayersLock) {
+            kickedPlayers.add(event.getPlayer().getUniqueId());
+            this.logger.info("Added player " + event.getPlayer().getUsername() + " to kicked players list");
+        }
     }
 
     @Subscribe
@@ -595,13 +605,27 @@ public class DreamingQueueEventHandler {
         
         // Only handle for non-queue server disconnections
         if (!disconnectedFrom.get().getServerInfo().equals(queueServer.getServerInfo())) {
-            // Store in grace period cache regardless of queue position
-            DisconnectedQueuePlayer gracePlayer = new DisconnectedQueuePlayer(
-                event.getPlayer(),
-                playerQueuePosition, 
-                configHelper.getGracePriority()
-            );
-            leftGracePlayers.put(event.getPlayer().getUniqueId(), gracePlayer);
+            boolean wasKicked = false;
+            
+            // Check if player was kicked (with thread safety)
+            synchronized (kickedPlayersLock) {
+                wasKicked = kickedPlayers.remove(event.getPlayer().getUniqueId());
+                if (wasKicked) {
+                    this.logger.info("Player " + event.getPlayer().getUsername() + " was kicked, skipping grace period");
+                }
+            }
+            
+            // Only give grace period if player wasn't kicked
+            if (!wasKicked) {
+                // Store in grace period cache regardless of queue position
+                DisconnectedQueuePlayer gracePlayer = new DisconnectedQueuePlayer(
+                    event.getPlayer(),
+                    playerQueuePosition, 
+                    configHelper.getGracePriority()
+                );
+                leftGracePlayers.put(event.getPlayer().getUniqueId(), gracePlayer);
+                this.logger.info("Player " + event.getPlayer().getUsername() + " disconnected normally, adding to grace period");
+            }
             
             if (getMonitoredServerStatus()) {
                 movePlayerFromQueue();
